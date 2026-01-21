@@ -28,6 +28,10 @@ from services.data_service import resolve_entity, format_attribute_answer
 # FastAPI App Setup
 # ------------------------
 app = FastAPI(title="ANVI AI Backend")
+@app.get("/health")
+def health():
+    return {"ok": True}
+
 
 app.add_middleware(
     CORSMiddleware,
