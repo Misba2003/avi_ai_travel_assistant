@@ -83,20 +83,22 @@ async def ask_ai(req: AskRequest):
         # 2.5️⃣ Entity + Attribute Bypass (before RAG/LLM)
         if intent.get("type") == "entity_lookup":
             detected_attribute = detect_attribute(query)
+
+            # ✅ Existing: entity + attribute bypass (NO LLM)
             if detected_attribute:
                 entity_name = intent.get("entity_name", "")
                 if entity_name:
                     print(f"[DEBUG] Entity lookup: {entity_name} | attribute: {detected_attribute} | session={session_id}")
                     entity_data = await resolve_entity(entity_name, intent)
-                    
+
                     if entity_data:
                         value = entity_data.get(detected_attribute)
                         answer = format_attribute_answer(entity_data, detected_attribute, value)
-                        
+
                         # Store assistant reply in memory
                         mem_size = await add_to_memory(session_id, "assistant", answer)
                         print(f"[DEBUG] Entity attribute response. Memory size={mem_size} | session={session_id}")
-                        
+
                         return {
                             "answer": answer,
                             "cards": []
@@ -104,6 +106,68 @@ async def ask_ai(req: AskRequest):
                     else:
                         # Entity not found, fall through to normal flow
                         print(f"[DEBUG] Entity '{entity_name}' not found, using normal flow | session={session_id}")
+
+            # ✅ NEW: entity-only queries (LLM summary on single resolved entity)
+            else:
+                entity_name = intent.get("entity_name", "")
+                if entity_name:
+                    print(f"[DEBUG] Entity-only lookup: {entity_name} | session={session_id}")
+                    entity_data = await resolve_entity(entity_name, intent)
+
+                    if entity_data:
+                        # Fetch SESSION memory (needed for LLM call)
+                        memory = await get_memory(session_id)
+                        mem_size = await get_memory_size(session_id)
+                        print(f"[DEBUG] Memory size={mem_size} | session={session_id}")
+
+                        amenities = entity_data.get("amenities") or []
+                        if isinstance(amenities, list) and amenities:
+                            amenities_str = ", ".join(amenities[:12])
+                        else:
+                            amenities_str = "Not provided"
+
+                        # Minimal single-entity context (no multi-entity fetch)
+                        entity_context = (
+                            "[1]\n"
+                            f"Name: {entity_data.get('name') or 'Unknown'}\n"
+                            f"Rating: {entity_data.get('rating') or 'Not provided'}\n"
+                            f"Address: {entity_data.get('address') or 'Not provided'}\n"
+                            f"Amenities: {amenities_str}\n"
+                            "Description: Not provided\n"
+                            "----"
+                        )
+
+                        summary_query = (
+                            f"Tell me something about {entity_data.get('name') or entity_name}. "
+                            "Write a short, factual 2–3 sentence summary using ONLY the provided context."
+                        )
+
+                        answer = await answer_with_ai(
+                            query=summary_query,
+                            context=entity_context,
+                            intent=intent,
+                            memory=memory
+                        )
+
+                        # Single card (do not fetch multiple hotels)
+                        card = {
+                            "title": entity_data.get("name"),
+                            "subtitle": "",
+                            "rating": entity_data.get("rating"),
+                            "address": entity_data.get("address"),
+                            "description": "",
+                            "image": None
+                        }
+
+                        # Store assistant reply in memory
+                        mem_size = await add_to_memory(session_id, "assistant", answer)
+                        print(f"[DEBUG] Entity-only response. Memory size={mem_size} | session={session_id}")
+
+                        return {
+                            "answer": answer,
+                            "cards": [card]
+                        }
+                    # If entity not found → fall through to existing generic behavior
 
         # 3️⃣ Build RAG context
         context = await get_rag_context(category_keyword, session_id, intent)
