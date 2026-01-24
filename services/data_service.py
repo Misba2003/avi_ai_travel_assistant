@@ -117,7 +117,11 @@ def normalize_hotel_entity(hotel: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def resolve_entity(entity_name: str, intent: Dict[str, Any]) -> Dict[str, Any] | None:
+async def resolve_entity(
+    entity_name: str,
+    intent: Dict[str, Any],
+    token: str | None = None,
+) -> Dict[str, Any] | None:
     """
     Resolve a single entity (hotel) by name from the API.
     Returns normalized entity data or None if not found.
@@ -135,8 +139,11 @@ async def resolve_entity(entity_name: str, intent: Dict[str, Any]) -> Dict[str, 
         "limit": 200,
     }
 
+    # Prefer caller-provided Bearer token; fall back to .env token
+    effective_token = (token or "").strip() or API_TOKEN
+
     headers = {
-        "Authorization": f"Bearer {API_TOKEN}",
+        "Authorization": f"Bearer {effective_token}",
         "Accept": "application/json",
     }
 
@@ -341,6 +348,7 @@ async def search_api(
     intent: Dict[str, Any],
     page: int = 1,
     limit: int = 30,
+    token: str | None = None,
 ) -> List[Dict[str, Any]]:
 
     params = {
@@ -349,8 +357,11 @@ async def search_api(
         "limit": limit,
     }
 
+    # Prefer caller-provided Bearer token; fall back to .env token
+    effective_token = (token or "").strip() or API_TOKEN
+
     headers = {
-        "Authorization": f"Bearer {API_TOKEN}",
+        "Authorization": f"Bearer {effective_token}",
         "Accept": "application/json",
     }
 

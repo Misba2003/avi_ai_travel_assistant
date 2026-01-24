@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -58,8 +58,19 @@ class AskRequest(BaseModel):
 # MAIN ENDPOINT
 # ------------------------
 @app.post("/ask")
-async def ask_ai(req: AskRequest):
+async def ask_ai(
+    req: AskRequest,
+    authorization: str = Header(None),
+):
     try:
+        # 0️⃣ Auth: Require valid Bearer token from caller (Flutter / frontend)
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        token = authorization.split(" ", 1)[1].strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
         query = req.query.strip()
         session_id = req.session_id.strip()
 
@@ -89,7 +100,7 @@ async def ask_ai(req: AskRequest):
                 entity_name = intent.get("entity_name", "")
                 if entity_name:
                     print(f"[DEBUG] Entity lookup: {entity_name} | attribute: {detected_attribute} | session={session_id}")
-                    entity_data = await resolve_entity(entity_name, intent)
+                    entity_data = await resolve_entity(entity_name, intent, token=token)
 
                     if entity_data:
                         value = entity_data.get(detected_attribute)
@@ -112,7 +123,7 @@ async def ask_ai(req: AskRequest):
                 entity_name = intent.get("entity_name", "")
                 if entity_name:
                     print(f"[DEBUG] Entity-only lookup: {entity_name} | session={session_id}")
-                    entity_data = await resolve_entity(entity_name, intent)
+                    entity_data = await resolve_entity(entity_name, intent, token=token)
 
                     if entity_data:
                         # Fetch SESSION memory (needed for LLM call)
@@ -196,7 +207,7 @@ async def ask_ai(req: AskRequest):
                 potential_entity_name = " ".join(entity_tokens)
                 
                 # Attempt entity resolution
-                entity_data = await resolve_entity(potential_entity_name, intent)
+                entity_data = await resolve_entity(potential_entity_name, intent, token=token)
                 
                 if entity_data:
                     # Check if normalized name is NOT generic
