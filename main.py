@@ -84,6 +84,44 @@ async def ask_ai(
         mem_size = 0
         print("[DEBUG] Stored user message in PostgreSQL memory")
 
+        # ------------------------
+        # Conversational short-circuit (NO RAG, NO LLM, NO DATA)
+        # ------------------------
+        q_lower = query.lower().strip()
+
+        CONVERSATIONAL_KEYWORDS = {
+            "hi", "hello", "hey",
+            "good morning", "good evening", "good afternoon",
+            "what can you help me with", "what can you do",
+            "how can you help me", "what do you do"
+        }
+
+        DOMAIN_KEYWORDS = {
+            "hotel", "hotels", "stay", "resort", "villa",
+            "price", "budget", "luxury", "rating", "address",
+            "amenities", "location", "near", "in"
+        }
+
+        is_conversational = (
+            any(k in q_lower for k in CONVERSATIONAL_KEYWORDS)
+            and not any(d in q_lower for d in DOMAIN_KEYWORDS)
+            and len(q_lower.split()) <= 8
+        )
+
+        if is_conversational:
+            greeting_answer = (
+                "Hey! 👋 I'm Anvi, I can help you with hotel searches, place details, "
+                "and travel-related questions based on our available data.\n\n"
+                "Just tell me what you're looking for 🙂"
+            )
+
+            await save_message(app_user_id, "assistant", greeting_answer)
+
+            return {
+                "answer": greeting_answer,
+                "cards": []
+            }
+
         # 2️⃣ Extract intent
         intent = extract_intent(query)
         category_keyword = intent["category"]
