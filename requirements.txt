@@ -6,7 +6,7 @@ pydantic
 httpx
 groq
 asyncpg
-jose
+python-jose
 
 
 
