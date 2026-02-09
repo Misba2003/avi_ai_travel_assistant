@@ -1,219 +1,150 @@
 import os
-from pathlib import Path
-from dotenv import load_dotenv
-
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-
-from services.intent_service import extract_intent, detect_attribute
-from services.rag_service import get_rag_context, get_rag_items
-from services.llm_service import answer_with_ai
-from services.memory_service import get_recent_messages, save_message
-from services.data_service import resolve_entity, format_attribute_answer, normalize_name
-
 from jose import jwt, JWTError
 
-# ------------------------
-# Load environment variables
-# ------------------------
-project_root = Path(__file__).resolve().parent
-dotenv_path = project_root / ".env"
-load_dotenv(dotenv_path)
+from services.intent_service import extract_intent, detect_attribute
+from services.data_service import resolve_entity, format_attribute_answer
+from services.memory_service import save_message, get_recent_messages
+from services.rag_service import get_rag_context, get_rag_items
+from services.llm_service import answer_with_ai
 
-# ------------------------
-# FastAPI App Setup
-# ------------------------
-app = FastAPI(title="ANVI AI Backend")
+app = FastAPI()
+JWT_ALGORITHM = "HS256"
 
-@app.get("/health")
-def health():
-    return {"ok": True}
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ------------------------
-# Request Model
-# ------------------------
 class AskRequest(BaseModel):
     query: str
     session_id: str | None = None
 
-# ------------------------
-# MAIN ENDPOINT
-# ------------------------
+
 @app.post("/ask")
-async def ask_ai(
-    req: AskRequest,
-    authorization: str = Header(None),
-):
+async def ask_ai(req: AskRequest, authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = authorization.split(" ", 1)[1]
+    JWT_SECRET = os.getenv("JWT_SECRET")
+
     try:
-        # ------------------------
-        # AUTH (JWT)
-        # ------------------------
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Unauthorized")
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = str(payload["user_id"])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-        token = authorization.split(" ", 1)[1].strip()
-        if not token:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    query = req.query.strip()
+    q_lower = query.lower()
 
-        JWT_SECRET = os.getenv("JWT_SECRET")
-        JWT_ALGORITHM = "HS256"
+    await save_message(user_id, "user", query)
 
-        if not JWT_SECRET:
-            raise HTTPException(status_code=500, detail="JWT_SECRET not configured")
-
-        try:
-            payload = jwt.decode(
-                token,
-                JWT_SECRET,
-                algorithms=[JWT_ALGORITHM],
-                options={
-                    "require": ["exp", "user_id"],
-                    "verify_exp": True,
-                    "verify_signature": True,
-                },
-            )
-            app_user_id = str(payload["user_id"])
-        except JWTError:
-            raise HTTPException(status_code=401, detail="Invalid token")
-
-        # ------------------------
-        # REQUEST DATA
-        # ------------------------
-        query = req.query.strip()
-        session_id = (req.session_id or "").strip()
-
-        if not query:
-            raise HTTPException(status_code=400, detail="Query is required")
-
-        print(f"[DEBUG] /ask → {query} | session: {session_id}")
-
-        # ------------------------
-        # STORE USER MESSAGE
-        # ------------------------
-        await save_message(app_user_id, "user", query)
-        print("[DEBUG] Stored user message in PostgreSQL memory")
-
-        # ------------------------
-        # CONVERSATIONAL SHORT-CIRCUIT
-        # ------------------------
-        q_lower = query.lower()
-
-        CONVERSATIONAL_KEYWORDS = {
-            "hi", "hello", "hey",
-            "good morning", "good evening", "good afternoon",
-            "what can you help me with", "what can you do",
-            "how can you help me", "what do you do"
-        }
-
-        DOMAIN_KEYWORDS = {
-            "hotel", "hotels", "stay", "resort", "villa",
-            "price", "budget", "luxury", "rating", "address",
-            "amenities", "location", "near", "in"
-        }
-
-        is_conversational = (
-            any(k in q_lower for k in CONVERSATIONAL_KEYWORDS)
-            and not any(d in q_lower for d in DOMAIN_KEYWORDS)
-            and len(q_lower.split()) <= 8
+    # ---------------- GREETINGS ----------------
+    INTRO_TRIGGERS = {
+        "hi", "hello", "hey",
+        "how are you",
+        "how can you help",
+        "tell me about yourself",
+        "who are you",
+        "what can you do",
+        "introduce yourself",
+        "about yourself"
+    }
+    if any(t in q_lower for t in INTRO_TRIGGERS):
+        answer = (
+            "Hi! I’m Anvi AI, a Nashik-based travel assistant. "
+            "I help you find hotels, budget stays, luxury resorts, villas, "
+            "and amenities in and around Nashik. "
+            "You can ask me for hotel details, filters like pool or budget, "
+            "or specific questions about any hotel."
         )
+        await save_message(user_id, "assistant", answer)
+        return {"answer": answer, "cards": []}
 
-        if is_conversational:
-            greeting_answer = (
-                "Hey! 👋 I'm Anvi, I can help you with hotel searches, place details, "
-                "and travel-related questions based on our available data.\n\n"
-                "Just tell me what you're looking for 🙂"
-            )
+    intent = extract_intent(query) or {}
+    intent_type = intent.get("type")
 
-            await save_message(app_user_id, "assistant", greeting_answer)
+    # =========================================================
+    # 1️⃣ SPECIFIC HOTEL (entity + attribute)
+    # =========================================================
+    if intent_type == "entity_lookup":
+        entity_name = intent.get("entity_name")
+        if entity_name:
+            entity_data = await resolve_entity(entity_name, intent, token=token)
 
-            return {
-                "answer": greeting_answer,
-                "cards": []
-            }
-
-        # ------------------------
-        # INTENT
-        # ------------------------
-        intent = extract_intent(query)
-        category_keyword = intent["category"]
-
-        # ------------------------
-        # ENTITY + ATTRIBUTE BYPASS
-        # ------------------------
-        if intent.get("type") == "entity_lookup":
-            detected_attribute = detect_attribute(query)
-
-            if detected_attribute:
-                entity_name = intent.get("entity_name", "")
-                entity_data = await resolve_entity(entity_name, intent, token=token)
-
-                if entity_data:
+            if entity_data:
+                detected_attribute = detect_attribute(query)
+                if detected_attribute:
                     value = entity_data.get(detected_attribute)
-                    answer = format_attribute_answer(entity_data, detected_attribute, value)
+                    answer = format_attribute_answer(
+                        entity_data, detected_attribute, value
+                    )
+                    await save_message(user_id, "assistant", answer)
+                    return {"answer": answer, "cards": []}
 
-                    await save_message(app_user_id, "assistant", answer)
+                entity_context = (
+                    f"Hotel Name: {entity_data.get('vendor_name')}\n"
+                    f"Rating: {entity_data.get('star_rating')}\n"
+                    f"Address: {entity_data.get('address')}\n"
+                    f"Amenities: {', '.join(entity_data.get('amenities', []))}\n"
+                    f"Description: {entity_data.get('description')}\n"
+                )
 
-                    return {
-                        "answer": answer,
-                        "cards": []
-                    }
+                history = await get_recent_messages(user_id)
 
-        # ------------------------
-        # RAG CONTEXT
-        # ------------------------
-        context = await get_rag_context(category_keyword, session_id, intent)
+                answer = await answer_with_ai(
+                    query=query,
+                    context=entity_context,
+                    intent=intent,
+                    memory=history
+                )
 
-        history = await get_recent_messages(app_user_id)
-        memory = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+                card = {
+                    "title": entity_data.get("vendor_name"),
+                    "subtitle": entity_data.get("area_name"),
+                    "rating": entity_data.get("star_rating"),
+                    "address": entity_data.get("address"),
+                    "description": entity_data.get("description"),
+                    "image": entity_data.get("image_url"),
+                    "category_id": entity_data.get("category_id"),
+                    "table_id": entity_data.get("table_id"),
+                }
 
-        # ------------------------
-        # LLM
-        # ------------------------
-        answer = await answer_with_ai(
-            query=query,
-            context=context or "",
+                await save_message(user_id, "assistant", answer)
+                return {"answer": answer, "cards": [card]}
+
+    # =========================================================
+    # 2️⃣ LIST / FILTER SEARCH
+    # =========================================================
+    if any(w in q_lower for w in ["hotel", "hotels", "stay", "resort", "villa"]):
+        history = await get_recent_messages(user_id)
+
+        rag_context = await get_rag_context(
+            keyword=query,
+            session_id=req.session_id or "",
             intent=intent,
-            memory=memory
         )
 
-        # ------------------------
-        # CARDS
-        # ------------------------
-        items = await get_rag_items(category_keyword, intent)
+        items = await get_rag_items(query, intent)
 
-        cards = []
-        for item in items[:8]:
-            cards.append({
-                "title": item.get("vendor_name"),
-                "subtitle": item.get("area_name"),
-                "rating": item.get("star_rating"),
-                "address": item.get("address"),
-                "description": item.get("description"),
-                "image": item.get("image_url")
-            })
+        if items:
+            answer = await answer_with_ai(
+                query=query,
+                context=rag_context,
+                intent=intent,
+                memory=history,
+            )
 
-        await save_message(app_user_id, "assistant", answer)
+            cards = [{
+                "title": i.get("vendor_name"),
+                "subtitle": i.get("area_name"),
+                "rating": i.get("star_rating"),
+                "address": i.get("address"),
+                "description": i.get("description"),
+                "image": i.get("image_url"),
+                "category_id": i.get("category_id"),
+                "table_id": i.get("table_id"),
+            } for i in items[:8]]
 
-        return {
-            "answer": answer,
-            "cards": cards
-        }
+            await save_message(user_id, "assistant", answer)
+            return {"answer": answer, "cards": cards}
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("[ERROR]", e)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    return {"answer": "No matching data found.", "cards": []}
