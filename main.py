@@ -12,6 +12,11 @@ from services.llm_service import answer_with_ai
 app = FastAPI()
 JWT_ALGORITHM = "HS256"
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 
 class AskRequest(BaseModel):
     query: str
