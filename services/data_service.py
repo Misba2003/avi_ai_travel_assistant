@@ -1,8 +1,8 @@
 # services/data_service.py
 
 import os
-import random
 from typing import Any, Dict, List
+from fastapi import Query
 import httpx
 from dotenv import load_dotenv
 
@@ -325,6 +325,47 @@ def format_attribute_answer(entity_data: Dict[str, Any], attribute: str, value: 
        return f"{entity_name} does not have  air-conditioned rooms."
 
 
+def canonical_category(raw_category: str) -> str:
+    if not raw_category:
+        return ""
+
+    c = raw_category.lower().strip()
+
+    if "hotel" in c:
+        return "hotel"
+    if "resort" in c:
+        return "resort"
+    if "villa" in c:
+        return "villa"
+    if "restaurant" in c or "cafe" in c:
+        return "restaurant"
+    if "medical" in c or "hospital" in c:
+        return "hospital"
+    if "office" in c:
+        return "office"
+    # Theaters
+    if "theater" in c or "theatre" in c or "theaters" in c or "theatres" in c:
+        return "theater"
+    if "museum" in c:
+        return "museum"
+    if "religious" in c or "temple" in c or "mandir" in c or "ashram" in c:
+        return "religious"
+    if "trek" in c:
+        return "treks"
+    if "adventure" in c or "one-day" in c:
+        return "adventure"
+    if "wildlife" in c or "nature" in c:
+        return "wildlife"
+    if "picnic" in c:
+        return "picnic"
+    if "wine" in c:
+        return "wine"
+    if "shopping" in c:
+        return "shopping"
+
+    return c
+
+
 def score_item(item: Dict[str, Any], intent: Dict[str, Any]) -> int:
     """
     Simple keyword-based scoring
@@ -351,10 +392,12 @@ async def search_api(
     token: str | None = None,
 ) -> List[Dict[str, Any]]:
 
+    search_domain = intent.get("search_domain") or query
+
     params = {
-        "query": query,
-        "page": page,
-        "limit": limit,
+        "query": search_domain,
+        "page": 1,
+        "limit": 200,
     }
 
     # Prefer caller-provided Bearer token; fall back to .env token
@@ -405,6 +448,7 @@ async def search_api(
             image_path = item["gallery_images"][0]
 
         item["image_url"] = build_image_url(image_path)
+        item["normalized_category"] = canonical_category(item.get("category"))
         normalized.append(item)
 
     # -------------------------------
@@ -413,12 +457,12 @@ async def search_api(
     for item in normalized:
         item["_score"] = score_item(item, intent)
 
+    # If keyword matches exist, rank them
     matched = [i for i in normalized if i["_score"] > 0]
 
-    # If nothing matched → randomize
-    if not matched:
-        random.shuffle(normalized)
-        return normalized[:8]
+    if matched:
+        matched.sort(key=lambda x: x["_score"], reverse=True)
+        return matched[:limit]
 
-    matched.sort(key=lambda x: x["_score"], reverse=True)
-    return matched[:8]
+    # If no keyword match, return all normalized items
+    return normalized[:limit]
