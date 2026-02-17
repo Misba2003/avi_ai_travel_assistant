@@ -7,7 +7,7 @@ from jose import jwt, JWTError
 from services.intent_service import extract_intent, detect_attribute
 from services.data_service import resolve_entity, format_attribute_answer
 from services.memory_service import save_message, get_recent_messages
-from services.rag_service import get_rag_context, get_rag_items
+from services.rag_service import get_rag_items
 from services.llm_service import answer_with_ai
 
 app = FastAPI()
@@ -250,6 +250,58 @@ async def ask_ai(req: AskRequest, authorization: str = Header(None)):
 
     # ---------- INTENT ----------
     intent = extract_intent(effective_query) or {}
+
+    # =========================================================
+    # GLOBAL ENTITY + ATTRIBUTE BYPASS (runs for ALL queries)
+    # =========================================================
+    detected_attribute = detect_attribute(query)
+
+    # Try resolving entity regardless of intent type
+    potential_entity_name = intent.get("entity_name") or intent.get("entity") or query
+
+    entity_data = await resolve_entity(potential_entity_name, intent, token=token)
+
+    if entity_data and detected_attribute:
+        print(f"[DEBUG] GLOBAL entity+attribute → {entity_data.get('name')} | attr={detected_attribute}")
+
+        value = entity_data.get(detected_attribute)
+        answer = format_attribute_answer(entity_data, detected_attribute, value)
+
+        await save_message(user_id, "assistant", answer)
+        print(f"[DEBUG] GLOBAL attribute response stored")
+
+        return {
+            "answer": answer,
+            "cards": []
+        }
+
+    # --- ENTITY ATTRIBUTE SHORT-CIRCUIT ---
+    if intent.get("type") == "entity_attribute":
+        entity_name = intent.get("entity_name")
+        attributes = intent.get("attributes") or []
+
+        entity = await resolve_entity(entity_name, intent, token=token)
+
+        if not entity:
+            await save_message(user_id, "assistant", f"I couldn't find {entity_name} in our listings.")
+            return {
+                "answer": f"I couldn't find {entity_name} in our listings.",
+                "cards": []
+            }
+
+        answer_parts = [
+            format_attribute_answer(entity, attr, entity.get(attr))
+            for attr in attributes
+        ]
+        answer = " ".join(answer_parts) if answer_parts else "No attributes requested."
+
+        await save_message(user_id, "assistant", answer)
+        return {
+            "answer": answer,
+            "cards": [entity]
+        }
+    # --- END ENTITY ATTRIBUTE SHORT-CIRCUIT ---
+
     # Align RAG domain filter with intent: use same key as main.py DOMAIN_KEYWORDS.
     if intent.get("search_domain"):
         intent["category"] = intent["search_domain"]
@@ -305,19 +357,34 @@ async def ask_ai(req: AskRequest, authorization: str = Header(None)):
     # ===================================================
     # GENERAL SEARCH (LIST FLOW)
     # ===================================================
-    history = await get_recent_messages(user_id)
-
-    rag_context = await get_rag_context(
-        keyword=effective_query,
-        session_id=req.session_id or "",
-        intent=intent,
-    )
-
     items = await get_rag_items(effective_query, intent)
 
-    if not items:
+    # HARD STOP if amenity requested but no match
+    if intent.get("must_have") and not items:
         await save_message(user_id, "assistant", NO_DATA_MSG)
         return {"answer": NO_DATA_MSG, "cards": []}
+
+    # Build RAG context ONLY from these filtered items
+    rag_lines = []
+    for idx, i in enumerate(items[:8], 1):
+        name = i.get("vendor_name") or i.get("name") or "Unknown"
+        area = i.get("area_name") or ""
+        rating = i.get("star_rating") or ""
+        address = i.get("address") or ""
+        desc = (i.get("short_description") or i.get("description") or "")[:200]
+
+        rag_lines.append(
+            f"[{idx}]\n"
+            f"Name: {name}\n"
+            f"Area: {area}\n"
+            f"Rating: {rating}\n"
+            f"Address: {address}\n"
+            f"Description: {desc}\n----"
+        )
+
+    rag_context = "\n".join(rag_lines).strip()
+
+    history = await get_recent_messages(user_id)
 
     answer = await answer_with_ai(
         query=effective_query,

@@ -41,6 +41,14 @@ PHRASE_TO_CATEGORY = (
     ("day trips", "adventure"),
     ("guided tour", "tours"),
     ("guided tours", "tours"),
+    ("tourist attractions", "picnic"),
+    ("tourist attraction", "picnic"),
+    ("tourist spots", "picnic"),
+    ("tourist spot", "picnic"),
+    ("places to visit", "picnic"),
+    ("places to see", "picnic"),
+    ("sightseeing", "picnic"),
+    ("things to see", "picnic"),
     ("picnic spot", "picnic"),
     ("picnic spots", "picnic"),
     ("movie theater", "theater"),
@@ -126,11 +134,27 @@ STOPWORDS = {
     "tax", "taxes", "cancellation", "cancel", "unit"
 }
 
+# Broad tourism → picnic discovery; must run before generic category (hospital, hotel, etc.)
+BROAD_TOURISM = [
+    "tourist spot",
+    "tourist attraction",
+    "tourist place",
+    "things to see",
+    "sightseeing",
+    "place to visit",
+    "places to visit",
+]
+
 # -----------------------------
 # MAIN INTENT PARSER
 # -----------------------------
 def detect_intent(query: str) -> Dict[str, Any]:
     q = query.lower()
+    # Normalize common plural tourism words
+    q = re.sub(r"\btourists\b", "tourist", q)
+    q = re.sub(r"\battractions\b", "attraction", q)
+    q = re.sub(r"\bplaces\b", "place", q)
+    q = re.sub(r"\bspots\b", "spot", q)
 
     intent: Dict[str, Any] = {
         "raw_query": query,
@@ -150,6 +174,14 @@ def detect_intent(query: str) -> Dict[str, Any]:
         intent["action"] = "detail"
     elif any(w in q for w in ["who are you", "what can you do", "about yourself", "hey", "hi"]):
         intent["action"] = "general"
+
+    # -----------------------------
+    # Broad tourism first (before hospital/hotel/office etc.) → picnic + exploratory
+    # -----------------------------
+    if any(p in q for p in BROAD_TOURISM):
+        intent["exploratory"] = True
+        intent["search_domain"] = "picnic"
+        return intent
 
     # -----------------------------
     # Search domain: resolver first (keyword → dataset category), then DOMAIN_KEYWORDS
@@ -231,6 +263,8 @@ def detect_intent(query: str) -> Dict[str, Any]:
     exploratory_phrases = [
         "fun activities", "things to do", "what to do", "discover", "explore",
         "experiences", "activities in", "fun in", "something to do",
+        "tourist attractions", "tourist attraction", "tourist spots", "tourist spot",
+        "places to visit", "places to see", "sightseeing", "things to see",
     ]
     intent["exploratory"] = any(p in q for p in exploratory_phrases)
 
@@ -250,6 +284,16 @@ def detect_intent(query: str) -> Dict[str, Any]:
     ):
         intent["type"] = "entity_lookup"
         intent["entity_name"] = entity_val.strip()
+
+    # --- FINAL RELIGIOUS DOMAIN LOCK ---
+    religious_keywords = {"temple", "mandir", "ashram", "religious", "devotional", "pilgrimage"}
+
+    if any(k in q for k in religious_keywords):
+        intent["search_domain"] = "temple"
+
+        # mark as entity query if it contains a proper name pattern
+        if intent.get("entity_name"):
+            intent["type"] = "entity_lookup"
 
     return intent
 # ----------------------------------

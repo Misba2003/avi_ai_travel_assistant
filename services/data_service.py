@@ -131,6 +131,13 @@ async def resolve_entity(
     2. Performing name-based matching over ALL fetched items
     3. NOT relying on ranking or _score for entity resolution
     """
+    import re
+
+    def _normalize_tokens(text: str) -> set:
+        STOPWORDS = {"dr", "mr", "mrs", "ms", "hospital", "hotel", "temple", "in", "at", "the", "road", "rd", "nagar"}
+        tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        return {t for t in tokens if t not in STOPWORDS}
+
     # Fetch items directly from API without ranking
     # This ensures we check ALL items, not just top-ranked results
     params = {
@@ -184,51 +191,26 @@ async def resolve_entity(
         items.append(item)
 
     # ----------------------------------------
-    # Deterministic, guarded entity resolution
+    # Token-overlap matching (deterministic, no LLM)
     # ----------------------------------------
-    GENERIC_NAMES = {"hotel", "hotels", "resort", "villa"}
-
-    entity_normalized = normalize_name(entity_name)
-    if not entity_normalized:
+    query_tokens = _normalize_tokens(entity_name)
+    if not query_tokens:
         return None
 
-    # PASS 1 — exact match ONLY (on normalized names)
+    best_match: Dict[str, Any] | None = None
+    best_score = 0.0
+
     for item in items:
-        vendor_name = item.get("vendor_name", "")
-        if vendor_name:
-            vendor_normalized = normalize_name(vendor_name)
-            if vendor_normalized and entity_normalized == vendor_normalized:
-                return normalize_hotel_entity(item)
+        title_text = item.get("title") or item.get("vendor_name") or item.get("name") or ""
+        title_tokens = _normalize_tokens(title_text)
+        overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
 
-        name = item.get("name", "")
-        if name:
-            name_normalized = normalize_name(name)
-            if name_normalized and entity_normalized == name_normalized:
-                return normalize_hotel_entity(item)
+        if overlap >= 0.6 and overlap > best_score:
+            best_score = overlap
+            best_match = item
 
-    # PASS 2 — fuzzy/contains match, guarded against generic names
-    for item in items:
-        vendor_name = item.get("vendor_name", "")
-        if vendor_name:
-            vendor_normalized = normalize_name(vendor_name)
-            if vendor_normalized and vendor_normalized not in GENERIC_NAMES:
-                if (
-                    entity_normalized in vendor_normalized
-                    or vendor_normalized in entity_normalized
-                ):
-                    return normalize_hotel_entity(item)
-
-        name = item.get("name", "")
-        if name:
-            name_normalized = normalize_name(name)
-            if name_normalized and name_normalized not in GENERIC_NAMES:
-                if (
-                    entity_normalized in name_normalized
-                    or name_normalized in entity_normalized
-                ):
-                    return normalize_hotel_entity(item)
-
-    # No match found after checking all items
+    if best_match:
+        return normalize_hotel_entity(best_match)
     return None
 
 
@@ -392,7 +374,10 @@ async def search_api(
     token: str | None = None,
 ) -> List[Dict[str, Any]]:
 
-    search_domain = intent.get("search_domain") or query
+    if intent.get("must_have"):
+        search_domain = query
+    else:
+        search_domain = intent.get("search_domain") or query
 
     params = {
         "query": search_domain,
